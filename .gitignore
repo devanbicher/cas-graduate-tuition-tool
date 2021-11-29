@@ -1,0 +1,7 @@
+
+src/
+src/*
+
+# just ignore the backup emacs files ending with ~
+
+*.*~

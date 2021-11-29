@@ -1,0 +1,6 @@
+name = Tuition Tool Processing
+description = this module does the backend processing of the information and content types for making the tuition tool work properly.
+core = 7.x
+
+;
+configure = admin/config/tuition_tool

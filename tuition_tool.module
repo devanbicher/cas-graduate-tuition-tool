@@ -1,0 +1,1983 @@
+<?php
+/***********
+ ** TO-DO:
+ *********** 
+
+ * PUT a check in the default setting validation form to make sure the account # is 6 digits long, for now it can be any length, it will just throw the error when saving the entry.
+
+ * Maybe TRY field_has_data to see if the field has any data in it, rather than count() > 0 or whatever else you are usinn
+ *** Basically Just make sure that each part of a field is checked. i.e. [lang], [0], and ['value']
+
+ * Do I want to add a thousand separator to the 'totals box' on the top of each page?
+ ***  If I do, I will need to change how the code works, by replacing the printf, in the page.tpl, with a regular print and using number_format for each number in the function in the template.php
+
+ * Should I add a check in the default setting functions to make sure that numbers are only numbers, i.e. no numbers in account field.
+
+ *********/
+
+
+function connect_to_banner(){
+    //setup the banner connection
+    // return the connection object
+    require 'src/bannerconnect.php'; //moved to a different file for security reasons.
+    $bannerConn = banner_connect();
+    
+    return $bannerConn;
+}
+
+function get_remaining_student_info($pidm, $termcode, $bannerConn){
+    
+    $queryStudentInfo = "select SGBSTDN_COLL_CODE_1, SGBSTDN_DEPT_CODE, SGBSTDN_PROGRAM_1, SGBSTDN_DEGC_CODE_1
+                         from SGBSTDN where SGBSTDN_PIDM = '$pidm' and 
+                         SGBSTDN_TERM_CODE_EFF = (select max(SGBSTDN_TERM_CODE_EFF) from SGBSTDN where SGBSTDN_PIDM = '$pidm' and SGBSTDN_TERM_CODE_EFF<='$termcode')";
+
+    $stid = oci_parse($bannerConn, $queryStudentInfo);
+    
+    if(oci_execute($stid)){
+        while($row = oci_fetch_assoc($stid)){
+            $college = addslashes($row['SGBSTDN_COLL_CODE_1']);
+            $dept = addslashes($row['SGBSTDN_DEPT_CODE']);
+            $program = addslashes($row['SGBSTDN_PROGRAM_1']);
+            $degree = addslashes($row['SGBSTDN_DEGC_CODE_1']);
+        }
+        if(empty($college) && empty($dept) && empty($program) && empty($degree)){
+            $final_info = 'TUITION_TOOL-SCHOOL-ERROR'; //query executed but nothing to return
+        }
+        else{
+            $final_info = array("college"=>$college,
+                                "dept" => $dept,
+                                "program" => $program,
+                                "degree" => $degree);
+        }
+    }else{
+        $final_info = 'TUITION_TOOL-SCHOOL-ERROR';} //couldn't execute the query
+               
+    oci_free_statement($stid);
+    return $final_info;
+}
+
+function get_student_email($pidm, $bannerConn){
+        
+        $queryStudentEmail = "select GOREMAL_EMAIL_ADDRESS from GOREMAL where GOREMAL_EMAL_CODE = 'LU' and GOREMAL_PIDM = $pidm";
+        $stid = oci_parse($bannerConn, $queryStudentEmail);
+
+        if(oci_execute($stid)){
+            while($row = oci_fetch_assoc($stid)){
+                $stud_email = addslashes($row['GOREMAL_EMAIL_ADDRESS']);
+            }
+            if(empty($stud_email)){
+                return 'TUITION_TOOL-EMAIL-ERROR';
+            }//the query executed but returned nothing
+            else{
+                oci_free_statement($stid);
+                return $stud_email;
+            }
+        }else{return 'TUITION_TOOL-EMAIL-ERROR';}//There was an error executing the query
+}
+
+
+function get_info_from_lin($lin, $bannerConn){
+    
+    //TO BE SURE NOTHING GOES WRONG HERE, PUT A CHECK AT EACH STAGE OF THE OCI_... functions
+
+    //$queryStudentID = "SELECT SPRIDEN_ID, SPRIDEN_LAST_NAME, SPRIDEN_FIRST_NAME, SPRIDEN_MI FROM SPRIDEN WHERE SPRIDEN_ID = '$lin'"; //original query
+    $queryStudentID = "SELECT SPRIDEN_PIDM, SPRIDEN_ID, SPRIDEN_LAST_NAME, SPRIDEN_FIRST_NAME, SPRIDEN_MI FROM SPRIDEN WHERE SPRIDEN_ID = '$lin'";
+    $stid = oci_parse($bannerConn, $queryStudentID);
+    if(oci_execute($stid)){
+        while ($row = oci_fetch_assoc($stid)){
+            $firstName = addslashes($row['SPRIDEN_FIRST_NAME']);
+            //$studentFirstName = $row['SPRIDEN_FIRST_NAME']; //not sure if I need the backslash function
+            $studentMiddleName = addslashes($row['SPRIDEN_MI']);
+            $lastName = addslashes($row['SPRIDEN_LAST_NAME']);
+            $pidm = addslashes($row['SPRIDEN_PIDM']);
+        } // some students have more than one entry in Spriden due to name changes, data entered differently, etc.  This should take the last (most current)
+        if (empty($firstName) && empty($lastName) && empty($pidm)){
+            $stud_info = 'TUITION_TOOL-LIN-ERROR';//this means there was nothing to return
+        }
+        else{
+            $stud_info = array("first" => $firstName, "last" => $lastName, "pidm" => $pidm);
+        }
+    }else{$stud_info = 'TUITION_TOOL-LIN-ERROR';}//this means there was an error in the execution. 
+    
+    oci_free_statement($stid); //frees the parse variable set before the oci_execute
+    return $stud_info;
+}
+
+function get_crn_class_size($bannerConn,$crn,$term){
+    //do some stuff
+    $crnquery = "SELECT SSBSECT_ENRL FROM SSBSECT WHERE SSBSECT_CRN = $crn and SSBSECT_TERM_CODE = $term";
+    $stid = oci_parse($bannerConn,$crnquery);
+    if(oci_execute($stid)){
+        while($rowCRN = oci_fetch_assoc($stid)){
+            $class_size = addslashes($rowCRN['SSBSECT_ENRL']);
+        }
+        if(empty($class_size)){
+            $class_size = 99999; //this is an error
+        }
+    }
+    else{
+        $class_size = 99999; //this is an error
+    }
+    oci_free_statement($stid);
+    
+    return $class_size;
+}
+
+function get_course_name_from_crn($crn, $termCode, $bannerConn){
+    
+    //this function will get the class information from banner.  It should also use the results from the banner connection, but pass the connection object in as a parameter rather than 
+    
+    //CLASS SIZE:  SSBSECT_ENRL
+
+    $queryCRN = "SELECT SSBSECT_CRN, SSBSECT_SUBJ_CODE, SSBSECT_CRSE_NUMB, SSBSECT_SEQ_NUMB FROM SSBSECT WHERE SSBSECT_CRN = $crn and SSBSECT_TERM_CODE = $termCode";
+    $stid = oci_parse($bannerConn, $queryCRN);
+    if(oci_execute($stid)){
+        while($rowCRN = oci_fetch_assoc($stid)){
+            $subjectCode = $rowCRN['SSBSECT_SUBJ_CODE'];
+            $courseNumb = $rowCRN['SSBSECT_CRSE_NUMB'];
+            $seqNumb = $rowCRN['SSBSECT_SEQ_NUMB'];
+        }//end of while
+        if(empty($subjectCode) && empty($courseNumb) && empty($seqNumb)){
+            $course = 'TUITION_TOOL-CRN-ERROR';//this means there was nothing to return
+        }
+        else{
+            $course = $subjectCode.' '.$courseNumb.' '.$seqNumb;
+        }
+    }else{$course = 'TUITION_TOOL-CRN-ERROR';}//this means there was an error in the execution
+    
+    oci_free_statement($stid); //frees the parse variable set before the oci_execute
+    return $course;
+}
+
+
+function tuition_tool_node_validate($node, $form, &$form_state){
+
+    $lang = $node->language;
+    $bundle = $node->type;
+    $nodeid = $node->nid;
+    $boolTuition = 1; //This boolean variable checks to make sure the tuition value is filled in properly
+    
+    $valid_class_roles = array("Assistant", "Grader", "Instructor", "Lab Tech", "Primary Instructor");
+    $account_digits = 6;
+    
+    if(property_exists($node, 'field_term')){
+        // I need to put this here because I need the term for the dept/degree/colleg etc for a student.
+        $term_id = $node->field_term[$lang][0]['tid'];
+        $term_load = entity_load('taxonomy_term',array($term_id)); //term id from reference
+        //put in a check to make sure this isn't blank
+        $term_object = $term_load[$term_id];
+        $term_code = $term_object->field_banner_term_code[$lang][0]['value'];
+    }
+
+    //only get lin if the node class has the property ($node has field_lin)
+    if(property_exists($node, 'field_lin')){
+        $lin = $node->field_lin[$lang][0]['value'];//LIN is a required field so there should be no need for a check as long as the field exists
+        $updated_lin = TRUE; //assume LIN is updated (or never entered for this instance) and needs to be fetched
+        $updated_term = TRUE; //assume TERM is updated (or never entered for this instance) and needs to be fetched
+
+        if(in_array('#node',$form)){
+            if(property_exists($form['#node'],'field_lin') && property_exists($form['#node'],'field_term')){
+                if(count($form['#node']->field_lin)>0 && count($form['#node']->field_term)>0){
+                    $prev_lin = $form['#node']->field_lin[$lang][0]['value'];
+                    $prev_term_id = $form['#node']->field_term[$lang][0]['tid'];
+                    if($prev_term_id != $term_id){
+                        drupal_set_message('Term Updated, Student Banner info will be refetched.','warning');
+                    }
+                    if($prev_lin != $lin){
+                        drupal_set_message('LIN has been changed, Student Banner info will be refetched.','warning');
+                    }    
+                    if(($prev_term_id == $term_id) && ($prev_lin == $lin)){
+                        //nothing has been updated set both update variables to FALSE
+                        $updated_term = FALSE;
+                        $updated_lin = FALSE;
+                        drupal_set_message('Neither LIN nor Term updated, not re-fetching student data from banner','status');
+                    }
+                }       
+            }
+        }//done checking if LIN or term were updated
+
+        if($updated_term && $updated_lin){
+            $bannerConnect = connect_to_banner(); //I should put a separate error here if the banner connection doesn't work
+            $lin_info = get_info_from_lin($lin, $bannerConnect);
+            if($lin_info == 'TUITION_TOOL-LIN-ERROR'){
+                form_set_error('field_lin','The LIN, '. $lin.', you entered is not a valid LIN, please try again.');
+            }
+            else{
+                form_set_value($form['field_student_first_name'],array($lang=>array(0=>array('value'=>$lin_info["first"]))),$form_state);
+                form_set_value($form['field_student_last_name'],array($lang=>array(0=>array('value'=>$lin_info["last"]))),$form_state);
+                //now fetch the email
+                $pidm = $lin_info["pidm"];
+                $pidm_email = get_student_email($pidm, $bannerConnect);
+                if($pidm_email == 'TUITION_TOOL-EMAIL-ERROR'){
+                    form_set_error('field_student_email','The LIN, '. $lin.', did not return a valid email.');
+                }
+                else{
+                    form_set_value($form['field_student_email'],array($lang=>array(0=>array('email'=>$pidm_email))),$form_state);
+                }
+                //now fetch college, department, program, degree
+                $student_info = get_remaining_student_info($pidm, $term_code, $bannerConnect);
+                //$student_info = 'TUITION_TOOL-SCHOOL-ERROR';
+                if($student_info == 'TUITION_TOOL-SCHOOL-ERROR'){
+                    drupal_set_message('The LIN, '. $lin.', did not return any college/dept/program/degree info for terms before '.$term_code.' Please email mh0h@lehigh.edu about this issue','error');
+                    //uncomment the next line IF the form should throw an invalidate error if none of the above info is returned 
+                    //form_set_error('field_student_college', 'The LIN, '. $lin.', did not return any college/dept/program/degree info for term '.$term_code);
+                }
+                else{
+                    form_set_value($form['field_student_college'],array($lang=>array(0=>array('value'=>$student_info["college"]))),$form_state);
+                    form_set_value($form['field_student_department'],array($lang=>array(0=>array('value'=>$student_info["dept"]))),$form_state);
+                    form_set_value($form['field_student_program'],array($lang=>array(0=>array('value'=>$student_info["program"]))),$form_state);
+                    form_set_value($form['field_student_degree'],array($lang=>array(0=>array('value'=>$student_info["degree"]))),$form_state);
+                }
+            }
+        }//end of if LIN and Term were updated
+    }//end of if field_lin exists
+
+
+    // now get all of the infmoration for the entity field reference to aid type, only if the field exists
+    if(property_exists($node,'field_aid_type')){
+        
+        $aid_id = $node->field_aid_type[$lang][0]['target_id']; //reference to the aid type object
+        $aid_load = entity_load('node',array($aid_id)); //aid type id from reference
+        //put in a check to make sure this isn't blank
+        $aid_object = $aid_load[$aid_id];
+        $aid_title = $aid_object->title;
+        $aid_lang = $aid_object->language;
+	$aid_type_updated = FALSE; //bool value so I only have to save the aid object once.
+
+        if(count($aid_object->field_credits_year)>0){
+            $max_credits = $aid_object->field_credits_year[$lang][0]['value']; //max credits set in the aid type
+            if($max_credits >0){$bool_credits = TRUE;}
+            else{$bool_credits = FALSE;}
+        }else{$bool_credits = FALSE;}
+
+        if(count($aid_object->field_students_year)>0){
+            $max_students = $aid_object->field_students_year[$lang][0]['value'];
+            if($max_students>0){$bool_student = TRUE;}
+            else{$bool_student = FALSE;}
+        }else{$bool_student = FALSE;}
+        
+        if(count($aid_object->field_stipends_year)>0){
+            $max_stipend = $aid_object->field_stipends_year[$lang][0]['value'];
+            if($max_stipend>0){$bool_stipend = TRUE;}
+            else{$bool_stipend = FALSE;}
+        }else{$bool_stipend = FALSE;}
+
+        //is it okay if there is no account number?
+        $no_accnt_req = $aid_object->field_no_acct_req;
+        if(count($no_accnt_req) == 0){$no_accnt_req=0;
+        }else{$no_accnt_req = $aid_object->field_no_acct_req[$lang][0]['value'];}
+
+    }else{
+        //setting all of these as false allows us to do a simple check before doing some of the other logic
+        $bool_credits=FALSE;
+        $bool_stipend=FALSE;
+        $bool_student=FALSE;
+        $no_accnt_req=FALSE;
+    }//end of checking to make sure the entity reference exists
+
+    // CHECK TO MAKE SURE THE --- CREDITS --- AREN'T MAXED OUT!
+    if($bool_credits){ //count credits across aid entries of this aid type if selected
+        if (count($node->field_credits)>0){
+            $credits = $node->field_credits[$lang][0]['value']; //credit value for this node
+            if($credits == 0){
+                //I shouldn't have to do the querying if they didn't put in any credits
+                drupal_set_message("WARNING: You did not fill in any CREDIT. Did you mean to do that?",'warning'); //warn them if they didn't enter credits
+                $boolTuition = 0; //set tuition value to 0 since there were no credits 
+            }
+            $max_credits = $aid_object->field_credits_year[$lang][0]['value']; //max credits set in the aid type
+            $cred_sum = 0;  //sum for the credits
+            //setup query object to search for nodes that match
+            $ent_query = new EntityFieldQuery();
+            //these conditions filter the node list that will do the summing.
+            $ent_query->entityCondition('entity_type','node') //type is node
+                      ->entityCondition('bundle',$bundle) //only select from the same bundle (i.e. dept aid type)
+                      ->propertyCondition('status',NODE_PUBLISHED) //the node is published
+                      ->fieldCondition('field_aid_type','target_id',$aid_id,'=') //only select if it uses the same aid type
+                      ->fieldCondition('field_credits','value','0','>') //credits value is greater than 0 - to exclude errors & filter quicker
+                      ->addMetaData('account', user_load(1));
+
+            if(!(empty($nodeid))){
+                //does not include the current node id to avoid redundancy errors in summing ONLY IF $nodeid is defined, otherwise it doesn't work
+                $ent_query->entityCondition('entity_id',$nodeid,'<>');
+            }
+            $match_ents = $ent_query->execute(); //execute query to collect the nodes
+            if(count($match_ents) > 0){ //put a check here to make sure you can't max out your credits on one person (unlikely but still a possibility)
+                if(count($match_ents['node']) > 0){
+                    $match_ids = array(); //turn query array into list of just nids
+                    foreach($match_ents['node'] as $myent){
+                        $match_ids[] = $myent->nid;
+                    }
+                    $cur_credits = 0;
+                    //load node objects into iterable array
+                    $load_node = entity_load('node',$match_ids);
+                    //finally do the calculating
+                    foreach($load_node as $curnid){
+                        $cur_credits = $curnid->field_credits['und'][0]['value'];
+                        $cred_sum += $cur_credits;
+                    }
+                    $cred_sum += $credits; //add in credits for the current node
+                    if($cred_sum > $max_credits){
+		      form_set_error('field_credits','You have maxed out your credits. max: '.$max_credits.' current total: '.$cred_sum.'. Reduce Credits Somewhere to save this entry');
+                        $boolTuition = 0; //Tuition for this field is 0 since it exceeded max credits.
+                    }//end of if credit sum exceeds max
+                    else{
+                        $cred_left = $max_credits - $cred_sum;
+                        if($cred_left <= 9){
+                            drupal_set_message('CREDITS LOW! '.$cred_sum.' Credits used for: '.$aid_title.'. ONLY '.$cred_left.' left.','warning');
+                        }
+                        else{
+                            //uncomment this to show a message after the entry is saved. Don't need this if the table of values is displayed
+                            //drupal_set_message('Currently '.$cred_sum.' Credits used for: '.$aid_title.'. With '.$cred_left.' left.','status');
+                        }
+                        //update credit sum field in the aid content type, but only if the field is empty or if the new sum is different
+                        if(count($aid_object->field_credit_sum) > 0){
+                            $cur_credit_sum = $aid_object->field_credit_sum[$aid_lang][0]['value'];
+                            if($cur_credit_sum != $cred_sum){
+                                $aid_object->field_credit_sum = array($aid_lang => array(0 => array('value' => $cred_sum)));
+				$aid_type_updated = TRUE; //entity_save('node',$aid_object);
+                            }
+                        }
+                        else{
+                            $aid_object->field_credit_sum = array($aid_lang => array(0 => array('value' => $cred_sum)));
+                            $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+                        }
+                    }
+                }//end of if query['node'] is greater than 0
+            }//end of if query returned anything at all
+	    else{//nothing returned in the querying, meaning only 1 entry
+	      if($credits > 0){ //don't bother checking maximum, or updating credit sum if it's 0
+		if($credits > $max_credits){ //credits maxed out by this entry alone
+		  form_set_error('field_credits','You have maxed out your credits. max: '.$max_credits.' current total(from this entry alone): '.$credits.'. Reduce Credits to save this entry');
+		}
+		else{
+		  $aid_object->field_credit_sum = array($aid_lang => array(0 => array('value' => $credits)));
+		  $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+		}
+	      }// end of if credits > 0
+	    } //end of if there was 0 returned in the query
+        }//end of if credits is filled in
+        else{
+            drupal_set_message("WARNING: You did not fill in any CREDITS. Did you mean to do that?",'warning');
+            $boolTuition = 0;  //Tuition for this node is 0 since there were no credits entered.
+        }
+    }//END OF CHECKING --CREDITS--
+     
+    //This fills in the tuition field, calculated from cost per credit in aid type times credits entered for this aid
+    if(property_exists($node, 'field_credits') && property_exists($node, 'field_tuition')){ 
+        if(count($aid_object->field_cost_per_credit)>0 && $boolTuition){
+            $cost_per_cred = $aid_object->field_cost_per_credit[$lang][0]['value'];
+            if(empty($credits)){//check that the $credits variable is empty, not necessarily the field, i.e. no max_credits set in aid type
+                if(count($node->field_credits)>0){
+                    $credits = $node->field_credits[$lang][0]['value']; //credit value for this node
+                }
+                else{//no credits filled in, set credits to 0
+                    $credits = 0;
+                    drupal_set_message("WARNING: You did not fill in any CREDITS. Did you mean to do that?",'warning');
+                }
+            }
+            if($cost_per_cred>0){
+                $thisTuition = $credits * $cost_per_cred;
+            }else{$thisTuition = 0;}
+        }else{$thisTuition = 0;}//no cost per credit or credits set Tuition to 0
+                
+        form_set_value($form['field_tuition'],array($lang=>array(0=>array('value'=>$thisTuition))),$form_state);
+    }
+
+    // CHECK TO MAKE SURE --- stipend --- ISN'T MAXED OUT!
+    if($bool_stipend){ //count stipend across this aid type if true
+        if(count($node->field_stipend)>0){
+            $stipend = $node->field_stipend[$lang][0]['value']; //stipend value for this node
+            if($stipend == 0){
+                drupal_set_message("WARNING: You did not fill in any STIPEND. Did you mean to do that?",'warning');
+            } //warn them if they didn't enter stipend
+            $max_stipend = $aid_object->field_stipends_year[$lang][0]['value']; //max stipend amount set in the aid type
+            $stip_sum = 0; //sum for the stipends
+            //setup query object to search for nodes that match
+            $ent_query = new EntityFieldQuery(); //try clearing this object first then redo the query rather than instantiating the object each time
+            //these conditions filter the node list that will do the summing.
+            $ent_query->entityCondition('entity_type','node') //type is node
+                      ->entityCondition('bundle',$bundle) //only select from the same bundle (i.e. dept aid type)
+                      ->propertyCondition('status',NODE_PUBLISHED) //the node is published
+                      ->fieldCondition('field_aid_type','target_id',$aid_id,'=') //only select if it uses the same aid type
+                      ->fieldCondition('field_stipend','value','0','>') //stipend value is greater than 0 - to exclude errors & filter quicker
+                      ->addMetaData('account', user_load(1)); 
+
+            if(!(empty($nodeid))){
+                //does not include the current node id to avoid redundancy errors in summing ONLY IF $nodeid is defined
+                $ent_query->entityCondition('entity_id',$nodeid,'<>');
+            }
+            $match_ents = $ent_query->execute(); //execute query
+            if(count($match_ents) > 0){ //put a check here to make sure you can't max out your credits on one person (unlikely but still a possibility)
+                if(count($match_ents['node']) > 0){
+                    $match_ids = array(); //turn query array into list of just nids
+                    foreach($match_ents['node'] as $myent){
+                        $match_ids[] = $myent->nid;    
+                    }
+                    $cur_stipend = 0;
+                    //load node objects into iterable array
+                    $load_node = entity_load('node',$match_ids);
+                    //finally do the calculating
+                    foreach($load_node as $curnid){
+                        $cur_stipend = $curnid->field_stipend['und'][0]['value'];
+                        $stip_sum += $cur_stipend;
+                    }
+                    $stip_sum += $stipend; //add in stipend for the current node
+                    
+                    if($stip_sum > $max_stipend){
+                        form_set_error('field_stipend','You have maxed out your STIPEND! max: $'.$max_stipend.' current total: $'.$stip_sum.'.  Reduce Stipend somewhere to save this entry');
+                    }//end of if stipend sum exceeds max
+                    else{
+                        $stip_left = $max_stipend - $stip_sum;
+                        //uncomment this to show a message after the entry is saved.
+                        //drupal_set_message('Currently '.$stip_sum.' Stipends for Aid Type: '.$aid_title.'. With '.$stip_left.' left.','status');
+                        if(count($aid_object->field_stipend_sum)> 0){
+                            $cur_stip_sum = $aid_object->field_stipend_sum[$aid_lang][0]['value'];
+                            if($cur_stip_sum != $stip_sum){
+                                $aid_object->field_stipend_sum = array($aid_lang => array(0 => array('value' => $stip_sum)));
+                                $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+                            }
+                        }
+                        else{
+                            $aid_object->field_stipend_sum = array($aid_lang => array(0 => array('value' => $stip_sum)));                        
+			    $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+                        }
+                    }
+                }//end of if query['node'] is greater than 1
+            }//end of if query returned anything at all
+	    else{//else there was nothing returned in the querying
+	      if( $stipend > 0){//don't bother updating if the stipend is 0 for some reason
+		if($stipend > $max_stipend){
+		  //make sure they can't max out the stipend in one entry
+		  form_set_error('field_stipend','You have maxed out your STIPEND! max: $'.$max_stipend.' current total(from this entry alone): $'.$stipend.'.  Reduce Stipend to save this entry');
+		}
+		else{//if they didn't max out the stipend update the stipend sum in the aid type
+		  $aid_object->field_stipend_sum = array($aid_lang => array(0 => array('value' => $stipend)));                        
+		  $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+		}
+	      }//stipend > max stipend
+	    }//stipend > 0
+        }//end of if stipdend is filled in
+        else{drupal_set_message("WARNING: You did not fill in any STIPEND. Did you mean to do that?",'warning');}  //might not need to put in this warning since there might not be stipend
+    }//end of checking stipend
+
+    
+    if($bool_student){ //count students across this aid type if true
+        $max_students = $aid_object->field_students_year[$lang][0]['value']; //max number of students set in the aid type
+        //setup query object to search for nodes that match
+        $ent_query = new EntityFieldQuery();  //try clearing this object first then redo the query rather than instantiating the object each time
+        //these conditions filter the node list that will do the summing.
+        $ent_query->entityCondition('entity_type','node') //type is node
+                  ->entityCondition('bundle',$bundle) //only select from the same bundle (i.e. dept aid type)
+                  ->propertyCondition('status',NODE_PUBLISHED) //the node is published
+                  ->fieldCondition('field_aid_type','target_id',$aid_id,'=') //only select if it uses the same aid type
+                  ->addMetaData('account', user_load(1)); 
+
+        if(!(empty($nodeid))){
+            //does not include the current node id to avoid redundancy errors in summing ONLY IF $nodeid is defined
+            $ent_query->entityCondition('entity_id',$nodeid,'<>');
+        }
+
+        //execute query
+        $match_ents = $ent_query->execute();
+       //I need to put a check in here to catch if there are no matches for $match_ents['node'];
+       if(count($match_ents) > 0){
+           $stud_sum = count($match_ents['node']) + 1; //sum for the students which includes + 1 for the current node
+       }else{$stud_sum = 1;}//just one for the current node
+       
+       if($stud_sum > $max_students){
+           form_set_error('field_aid_type','You have maxed out your students for this aid type. max: '.$max_students.' current total: '.$stud_sum.'  Remove students or change aid type to save this submission');
+        }
+       else{
+           $stud_left = $max_students - $stud_sum;
+           if($stud_left <= 3){
+               drupal_set_message('STUDENTS LOW.  '.$stud_sum.' Students used for: '.$aid_title.'. ONLY '.$stud_left.' left.','warning');
+           }
+           else{
+               //uncomment this to show a message after the entry is saved.
+               //drupal_set_message('Currently '.$stud_sum.' Students used for: '.$aid_title.'. With '.$stud_left.' left.','status');
+           }
+           if(count($aid_object->field_student_sum)>0){
+               $cur_stud_sum = $aid_object->field_student_sum[$aid_lang][0]['value'];
+               if($cur_stud_sum != $stud_sum){
+                   $aid_object->field_student_sum = array($aid_lang => array(0 => array('value' => $stud_sum)));
+                   $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+               }
+           }
+           else{
+               $aid_object->field_student_sum = array($aid_lang => array(0 => array('value' => $stud_sum)));
+               $aid_type_updated = TRUE; //entity_save('node',$aid_object);
+           }
+       }
+    }//end of counting students
+
+    //If there is no max credits for this aid type and they enter credits require account
+    if(!$bool_credits && !$no_accnt_req && property_exists($node,'field_credits')){
+        if(count($node->field_credits)>0){
+            if($node->field_credits[$lang][0]['value']>0){
+                if(!(count($node->field_account_number)>0)){
+                    //This means there were credits filled in and no account number
+                    form_set_error('field_account_number','This aid type requires an account # if you are entereing credits (tuition). Enter a valid account number to save this submission');
+                }
+                else{
+                    if(!($node->field_account_number[$lang][0]['value']>0)){
+                        form_set_error('field_account_number','This aid type requires an account # if you are entereing credits (tuition). Enter a valid account number to save this submission');
+                    }
+		    else{
+		      $digit_count = preg_match_all("/[0-9]/",$node->field_account_number[$lang][0]['value'],$account_digit_match_array);
+		      if($digit_count != $account_digits){
+			form_set_error('field_account_number',"Account # must be $account_digits long, not $digit_count");
+		      }
+		    }
+                }
+            }
+        }
+    }//end of checking for account number for credits
+
+    //unlike for credits, stipend always requires an account number
+    if(property_exists($node,'field_stipend')){
+        if(count($node->field_stipend)>0){
+            if($node->field_stipend[$lang][0]['value']>0){
+                if(!(count($node->field_account_number)>0)){
+                    //This means there was stipend filled in and no account number
+                    form_set_error('field_account_number','An account # is always required when entering stipend. Enter a valid account number to save this submission');
+                }
+                else{
+                    if(!($node->field_account_number[$lang][0]['value']>0)){
+                        form_set_error('field_account_number','An account # is always required when entering stipend. Enter a valid account number to save this submission');
+                    }
+		    else{
+		      $digit_count = preg_match_all("/[0-9]/",$node->field_account_number[$lang][0]['value'],$account_digit_match_array);
+		      if($digit_count != $account_digits){
+			form_set_error('field_account_number',"Account # must be $account_digits long, not $digit_count");
+		      }
+		    }
+                }
+		//make sure pay periods is not empty
+		if(empty($node->field_pay_periods[$lang][0]['value'])){
+		  form_set_error('field_pay_periods',"Pay Periods MUST be filled in when entering stipend");
+		}
+		else{
+		  //not empty, check to make sure it's not zero
+		  if($node->field_pay_periods[$lang][0]['value'] == 0){
+		    form_set_error('field_pay_periods',"Pay Periods must be filled in when entering STIPEND and CAN'T BE ZERO");
+		  }
+		}
+		//make sure Start/End date is not empty
+		if(empty($node->field_aid_date[$lang][0]['value']) || empty($node->field_aid_date[$lang][0]['value2'])){
+		  form_set_error('field_aid_date',"Start and End Dates MUST be filled in when entering stipend");
+		}
+		else{
+		  //not empty, check to make sure it's not zero
+		  if($node->field_aid_date[$lang][0]['value'] == 0 || $node->field_aid_date[$lang][0]['value2'] == 0){
+		    form_set_error('field_aid_date',"Start and End Dates must be filled in when entering STIPEND and CAN'T BE ZERO");
+		  }
+		}
+            }
+        }
+    }//end of checking for account number for stipend
+
+    //Last thing to do is fill in class names from crns
+    if(property_exists($node,'field_crn') && property_exists($node, 'field_term')){
+        $crns = $node->field_crn; //crn numbers            
+        if(count($crns)>0){
+	  $crn_ind = 0;
+            if(empty($bannerConnect)){ //if bannerConnect is not set create new banner connection object
+                $bannerConnect = connect_to_banner();
+            }
+            $get_class_name = TRUE; //whether or not to do the banner query for a crn, true by default
+            $check_prev = TRUE; //whether or not to check if the crn has changed. 
+            if($updated_term){
+                $check_prev = FALSE; //we don't need to check if the crn has changed, the term has. fetch the class name
+            }
+            elseif(!in_array('#node',$form)){
+                $check_prev = FALSE; //no previous data, fetch the class name
+            }
+            elseif(!property_exists($form['#node'],'field_crn')){
+                $check_prev = FALSE; //no field_crn property in $from['#node'], fetch the class name
+            }
+            elseif(!(count($form['#node']->field_crn)>0)){
+                $check_prev = FALSE; //no values in previous field_crn, fetch the class name
+            }
+            elseif(!(count($form['#node']->field_crn[$lang])>0)){
+                $check_prev = FALSE; //no multiple values within the $lang array, fetch class name
+            }
+            else{
+                $previous_crn_count = count($form['#node']->field_crn[$lang]);//need this for no index error later
+            }
+            $crn_classes = array($lang=>array()); //set up the array to put the class names into
+            foreach($crns[$lang] as $crn){
+                if(is_array($crn)){
+                    if(!empty($crn['value'])){ //this empty() might not work on cas2
+                        $thiscrn = $crn['value'];
+                        if($check_prev){
+                            //check for previous values for this crn to compare against
+                            if($crn_ind >= ($previous_crn_count - 1)){
+                                $get_class_name = TRUE; //avoiding a potential indexing error, very edge case.
+                            }
+                            elseif($thiscrn == $form['#node']->field_crn[$lang][$crn_ind]['value']){
+                                $get_class_name = FALSE; //the value for this field hasn't changed, don't fetch.
+                                $prev_class_name = $node->field_crn_class[$lang][$crn_ind]['value'];
+                                $crn_classes[$lang][$crn_ind] = array('value'=> $prev_class_name); //keep class name
+                            }
+                            else{
+                                $get_class_name = TRUE; //make sure this is set back to true, e.g. preceding crn wasn't changed, but this one was
+                            }
+                        }
+                        if($get_class_name){
+                            $crn_class_name = get_course_name_from_crn($thiscrn,$term_code,$bannerConnect);
+                            if($crn_class_name == 'TUITION_TOOL-CRN-ERROR'){
+                                form_set_error('field_crn','The crn, '. $thiscrn.', returned an error please check it is a valid CRN for term: '. $term_code);
+                                $crn_classes[$lang][$crn_ind] = array('value'=> 'CRN-ERROR: '.$thiscrn);
+                            }
+                            else{
+                                $crn_classes[$lang][$crn_ind] = array('value'=> $crn_class_name);
+                            }
+                        }//end of fetching class name for this crn                        
+			$crn_ind += 1;
+                    }//end of making sure the $crn['value'] is not empty
+                }//end of checking the current item is an array
+            }//end of foreach
+            form_set_value($form['field_crn_class'],$crn_classes,$form_state);
+	    //put in a check to make sure the number of roles the user entered is the same as the number of crns
+	    //and also that each role falls within the correct list of roles
+	    //I think that there is a passable edge case here in which the number of fields is the same between role and crn but one has an empty value.
+	    $class_roles = $node->field_class_role;
+	    if(count($class_roles)>0){
+	      if(count($class_roles[$lang])>0){
+		$role_ind = 0;
+		$filled_role_ind = 0;
+		foreach($class_roles[$lang] as $myrole){
+		  if(is_array($myrole)){
+		      if(!empty($myrole['value'])){
+			//check to see if the role is in the list.
+			if(!in_array(trim($myrole['value']),$valid_class_roles)){
+			  $form_role_ind = $role_ind +1;
+			  form_set_error('field_class_role',"The role(# $form_role_ind), ".$myrole['value']." is not in the valid list of roles");
+			  }	
+			$filled_role_ind += 1;
+		      }
+		  }
+		  $role_ind += 1;
+		}//end of foreach
+		//if the below statement creates errors, try adding this back in:  if(count($class_roles[$lang]) != count($crns[$lang])){
+		if($filled_role_ind != $crn_ind){ //using these as the check should be the correct behavior
+		  if(count($class_roles[$lang]) < count($crns[$lang]) || $filled_role_ind < $crn_ind){
+		    form_set_error('field_class_role', 'Please make sure there is a Role for each CRN entered');
+		  }
+		  else{
+		    form_set_error('field_class_role','The number of roles and crns must be equal, if you feel this message is an error please email dlb213@lehigh.edu.');
+		  }
+		}//end of if filled in counts don't match
+	      }
+	    }  		   
+	    elseif(empty($class_roles) && count($crns[$lang])>0){
+	      form_set_error('field_class_role','You Filled in CRNs but no roles, please fill in a role for each CRN entered.');
+	    }
+        }//end of if there are crns
+    }// end of if the crn and term field exists    
+
+    //save the aid_object if it's been updated and if the object itself exists
+    if(!empty($aid_object) && $aid_type_updated){
+      entity_save('node',$aid_object);
+    }
+
+    //close the banner connection if it is open(i.e. the variable is not empty)
+    if(!empty($bannerConnect)){   
+        oci_close($bannerConnect);
+    }
+
+}// end of of validate function
+
+
+function tuition_tool_node_delete($node){
+  //node level variables and values
+  $lang = $node->language;
+  $bundle = $node->type;
+  $nodeid = $node->nid;
+
+  //maybe I should add a check to make sure that this bundle is in the list of entry types
+  ///// for now checking that it has the property of 'field_aid_type' is sufficient
+
+  //aid object and aid object values
+  if(property_exists($node,'field_aid_type')){   
+    $aid_id = $node->field_aid_type[$lang][0]['target_id']; //reference to the aid type object
+    $aid_load = entity_load('node',array($aid_id)); //aid type id from reference
+    $aid_object = $aid_load[$aid_id];
+    $aid_title = $aid_object->title;
+    $aid_lang = $aid_object->language; 
+  
+    //update the student sum
+    if(count($aid_object->field_student_sum)>0){
+      $stud_sum = $aid_object->field_student_sum[$lang][0]['value'];
+      if($stud_sum > 0){
+	$new_stud_sum = $stud_sum - 1; //calculate the new student sum by simply subtracting this student      
+	drupal_set_message("Updated Aid Type:  $aid_title.",'status');
+	drupal_set_message("Removed 1 student. New Student Total: $new_stud_sum",'status');
+	//update the value with the new student sum
+	$aid_object->field_student_sum = array($aid_lang => array(0 => array('value' => $new_stud_sum)));
+	//entity_save('node',$aid_object); //I am going to put this at the bottom of this if statement for now
+      }
+    }
+    
+    //update the credits sum
+    if(property_exists($node,'field_credits')){
+      if(count($node->field_credits)>0 && count($aid_object->field_credit_sum)>0){
+	$credits = $node->field_credits[$lang][0]['value'];
+	$cred_sum = $aid_object->field_credit_sum[$lang][0]['value'];
+	if( $credits > 0 && $cred_sum > 0 && $cred_sum >= $credits){
+	  $new_cred_sum = $cred_sum - $credits;
+	  drupal_set_message("Removed $credits credits. New Credit Total:  $new_cred_sum",'status');
+	  //update value for the credit sum
+	  $aid_object->field_credit_sum = array($aid_lang => array(0 => array('value' => $new_cred_sum)));
+	}
+      }
+    }//end of if credits property exists
+    
+    //update the stipend sum
+    if(property_exists($node,'field_stipend')){
+      if(count($node->field_stipend)>0 && count($aid_object->field_stipend_sum)>0){
+	$stipend = $node->field_stipend[$lang][0]['value'];
+	$stip_sum = $aid_object->field_stipend_sum[$lang][0]['value'];
+	if($stipend > 0 && $stip_sum > 0 && $stip_sum >= $stipend){
+	  $new_stip_sum = $stip_sum - $stipend;
+	  drupal_set_message("Removed $$stipend from stipend. New Stipend Total:  $$new_stip_sum",'status');
+	  $aid_object->field_stipend_sum = array($aid_lang => array(0 => array('value' => $new_stip_sum)));
+	}
+      }
+    } //end of if stipend property exists
+
+    //I could put a check here to make sure that the aid entity is updated, but it will always be updated by the number of students changing
+    entity_save('node',$aid_object);
+  }// end of if field_aid_type in a property of this node.
+}//end of node delete function
+
+
+function get_aid_types($aid_bundle){
+    $aid_types = array();
+
+    $ent_query = new EntityFieldQuery();//new entity query object to get nodes that have
+    $ent_query->entityCondition('entity_type','node') //type is node 
+              ->entityCondition('bundle',$aid_bundle) //only select from the same bundle (i.e. dept aid)a
+              ->propertyCondition('status',NODE_PUBLISHED) //the node is published
+              ->fieldCondition('field_term_year','tid',variable_get('default_year'),'='); //only select if it uses the selected term
+    
+    $match_ents = $ent_query->execute();
+        
+    if(count($match_ents)>0){
+        if(count($match_ents['node'])>0){
+            foreach($match_ents['node'] as $entinf){
+                $mynid = $entinf->nid;
+                $my_node = node_load($mynid);
+                $aid_types[$mynid] = $my_node->title;
+            }
+        }
+    }
+    
+    return $aid_types;
+}
+
+function get_aid_types_and_years($aid_bundle){
+    $aid_types = array();
+
+    $ent_query = new EntityFieldQuery();//new entity query object to get nodes that have
+    $ent_query->entityCondition('entity_type','node') //type is node 
+              ->entityCondition('bundle',$aid_bundle) //only select from the same bundle (i.e. dept aid)a
+              ->propertyCondition('status',NODE_PUBLISHED); //the node is published
+        //->fieldCondition('field_term_year','tid',variable_get('default_year'),'='); //only select if it uses the default year
+    
+    $match_ents = $ent_query->execute();
+        
+    if(count($match_ents)>0){
+        if(count($match_ents['node'])>0){
+            foreach($match_ents['node'] as $entinf){
+                $mynid = $entinf->nid;
+                $my_node = node_load($mynid); //load the node to get the associated year
+                $year_tid = $my_node->field_term_year['und'][0]['tid']; //required field, should always be there
+                $year_term = entity_load('taxonomy_term',array($year_tid));
+                $year = $year_term[$year_tid]->name;
+                $aid_types[$mynid] = $my_node->title.' - '.$year;
+            }
+        }
+    }
+    
+    return $aid_types;
+}
+
+//ALTERING NODE FORMS for aid entries so that they display the same set of aid types
+//function tuition_tool_form_math_aid_node_form_alter(&$form, &$form_state, $form_id){
+
+function tuition_tool_form_american_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('american_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_bio_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('bio_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_chem_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('chem_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_coll_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('coll_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_ees_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('ees_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_epd_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('epd_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_english_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('english_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_intdisc_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('intdisc_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_history_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('history_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_math_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('math_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_misc_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('misc_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_physics_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('physics_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_polisci_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('polisci_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_psych_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('psych_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+function tuition_tool_form_socanth_aid_entry_node_form_alter(&$form, &$form_state, $form_id){
+    $lang = $form['language']['#value'];
+    $form['field_aid_type'][$lang]['#options'] = get_aid_types('socanth_aid_type');
+    $form['field_term'][$lang]['#options'] = get_node_form_terms();
+}
+
+
+//THE NEXT SET OF FUNCTIONS DEALS WITH VIEWS, CUSTOM VIEWS AND (LEHIGH) FORM GENERATING
+
+function tuition_tool_form_views_exposed_form_alter(&$form, &$form_state, $form_id) {
+/*
+  This is the view-id for the master view for exporting
+    if($form['#id'] == 'views-exposed-form-master-aid-entries-listing-page'){
+        dsm($form);
+    }
+*/
+
+
+/*
+  THIS IS FROM THE OLD TOOL, IN THE SANDBOX SITE, NEED TO CHANGE THE VIEW ID TO MAKE THIS WORK IF I WANT.
+
+    if($form['#id'] == 'views-exposed-form-math-aids-test-page-2' || $form['#id'] == 'views-exposed-form-math-aids-page-1'){
+        //dsm($form);
+        //check to see if the term is set first(to get a list of aid types based on terms)
+        if (isset($form['field_aid_type_target_id'])) {
+            $form['field_aid_type_target_id'] = array(
+                '#type' => 'select',
+                //CHANGE THIS NEXT LINE FROM 'MATH_AID_TYPE' TO A DIFFERENT VALUE AFTER YOU BUILD THE VIEW
+                '#options' => get_aid_types_and_years('math_aid_type'), // get array of 'client id' => 'client label'
+                //'#options' => get_aid_types(), // get array of 'client id' => 'client label'
+                '#default_value' => $form['field_aid_type_target_id']['#default_value'],
+            );
+        
+        }
+    }
+*/
+}
+
+
+//END OF VIEWS STUFF
+//THE NEXT SET OF FUNCTIONS DEALS WITH PERMISSIONS, AND ADMIN SPACE (i.e. fetching class enrollment)
+function tuition_tool_permission(){
+    
+    return array(
+        'access tuition tool admin' => array(
+            'title' => t('Access Tuition Tool Admin Menu'),
+            'description' => t('Allows the user to fetch class enrollment data'),
+        ),
+        
+        'access default landing' => array(
+            'title' => t('Access Tuition Tool Default Landing Space for defaults menu'),
+            'description' => t('Allows the user to set field defaults for an Aid Content Type'),
+        ),
+
+        'access american defaults' => array(
+            'title' => t('Access Tuition Tool AMERICAN Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the AMERICAN Aid Content Type'),
+            ),
+
+        'access bio defaults' => array(
+            'title' => t('Access Tuition Tool BIOLOGY Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the BIOLOGY Aid Content Type'),
+            ),
+
+        'access chem defaults' => array(
+            'title' => t('Access Tuition Tool CHEMISTRY Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the CHEMISTRY Aid Content Type'),
+            ),
+
+        'access coll defaults' => array(
+            'title' => t('Access Tuition Tool COLLEGE Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the COLLEGE Aid Content Type'),
+            ),
+
+        'access ees defaults' => array(
+            'title' => t('Access Tuition Tool EES Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the EES Aid Content Type'),
+            ),
+
+        'access english defaults' => array(
+            'title' => t('Access Tuition Tool ENGLISH Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the ENGLISH Aid Content Type'),
+            ),
+
+        'access epd defaults' => array(
+            'title' => t('Access Tuition Tool EPD Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the EPD Aid Content Type'),
+            ),
+	
+        'access intdisc defaults' => array(
+            'title' => t('Access Tuition Tool INTERDISCIPLINARY Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the INTERDISCIPLINARY Aid Content Type'),
+            ),
+
+        'access history defaults' => array(
+            'title' => t('Access Tuition Tool HISTORY Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the HISTORY Aid Content Type'),
+            ),
+
+        'access math defaults' => array(
+            'title' => t('Access Tuition Tool MATH Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the MATH Aid Content Type'),
+            ),
+
+        'access misc defaults' => array(
+            'title' => t('Access Tuition Tool MISCELLANEOUS Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the MISCELLANEOUS Aid Content Type'),
+            ),
+
+        'access physics defaults' => array(
+            'title' => t('Access Tuition Tool PHYSICS Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the PHYSICS Aid Content Type'),
+            ),
+
+        'access polisci defaults' => array(
+            'title' => t('Access Tuition Tool POLITICAL SCIENCE Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the POLITICAL SCIENCE Aid Content Type'),
+            ),
+
+        'access psych defaults' => array(
+            'title' => t('Access Tuition Tool PSYCHOLOGY Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the PSYCHOLOGY Aid Content Type'),
+            ),
+
+        'access socanth defaults' => array(
+            'title' => t('Access Tuition Tool SOCANTHRO Defaults Menu'),
+            'description' => t('Allows the user to set field defaults for the SOCANTHRO Aid Content Type'),
+            ),
+    );
+
+}
+
+function tuition_tool_menu(){
+
+    $items = array();
+    
+    $items['admin/config/tuition_tool'] = array(
+        'title' => 'Tuition Tool',
+        'description' => 'Tuition Tool admin space for setting site-wide defaults.',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_admin_form'),
+        'access arguments' => array('access tuition tool admin'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    $items['admin/config/tuition_tool/enrollment'] = array(
+        'title' => 'Tuition Enrollment',
+        'description' => 'Tuition Tool Admin Space for enrollment fetching only.',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_enrollment_form'),
+        'access arguments' => array('access tuition tool admin'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    
+    $items['admin/content/tuition_tool'] = array(
+        'title' => 'Tuition Tool Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_land_default_form'),
+        'access arguments' => array('access default landing'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    //if you wanted to, you could generate these automatically from the list of departments
+    $items['admin/content/tuition_tool/american_defaults'] = array(
+        'title' => 'American Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_american_defaults_form'),
+        'access arguments' => array('access american defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/bio_defaults'] = array(
+        'title' => 'Biology Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_bio_defaults_form'),
+        'access arguments' => array('access bio defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/chem_defaults'] = array(
+        'title' => 'Chemistry Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_chem_defaults_form'),
+        'access arguments' => array('access chem defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/coll_defaults'] = array(
+        'title' => 'College Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_coll_defaults_form'),
+        'access arguments' => array('access coll defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/ees_defaults'] = array(
+        'title' => 'EES Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_ees_defaults_form'),
+        'access arguments' => array('access ees defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/english_defaults'] = array(
+        'title' => 'English Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_english_defaults_form'),
+        'access arguments' => array('access english defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/epd_defaults'] = array(
+        'title' => 'EPD Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_epd_defaults_form'),
+        'access arguments' => array('access epd defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/intdisc_defaults'] = array(
+        'title' => 'Interdisciplinary Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_intdisc_defaults_form'),
+        'access arguments' => array('access intdisc defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/history_defaults'] = array(
+        'title' => 'History Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_history_defaults_form'),
+        'access arguments' => array('access history defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/math_defaults'] = array(
+        'title' => 'Math Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_math_defaults_form'),
+        'access arguments' => array('access math defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/misc_defaults'] = array(
+        'title' => 'Miscellaneous Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_misc_defaults_form'),
+        'access arguments' => array('access misc defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/physics_defaults'] = array(
+        'title' => 'Physics Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_physics_defaults_form'),
+        'access arguments' => array('access physics defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/polisci_defaults'] = array(
+        'title' => 'Political Science Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_polisci_defaults_form'),
+        'access arguments' => array('access polisci defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/psych_defaults'] = array(
+        'title' => 'Psychology Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_psych_defaults_form'),
+        'access arguments' => array('access psych defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    $items['admin/content/tuition_tool/socanth_defaults'] = array(
+        'title' => 'Socanthro Defaults',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('tuition_tool_socanth_defaults_form'),
+        'access arguments' => array('access socanth defaults'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+
+    return $items;    
+}
+
+function get_terms_for_class_size(){
+
+    $terms  = array();
+    
+    $ent_query = new EntityFieldQuery();
+    //these conditions filter the node list that will do the summing.
+    $ent_query->entityCondition('entity_type','taxonomy_term') //type is term
+              ->entityCondition('bundle','termcodes'); //only select from the same bundle (i.e. dept aid type)
+
+    $match_ents = $ent_query->execute();
+    
+    foreach($match_ents['taxonomy_term'] as $myent){
+        $match_ids[] = $myent->tid;
+    }
+    //load node objects into iterable array
+    $load_terms = entity_load('taxonomy_term',$match_ids);
+    //finally do the calculating
+    
+    foreach($load_terms as $curtid){
+        $myval = $curtid->field_banner_term_code['und'][0]['value'].'-'.$curtid->tid; //I need both the tid and banner code to run the banner query and entity query
+        $terms[$myval] = $curtid->name;
+    }
+
+    krsort($terms);
+    return $terms;
+}
+
+//DELETE THIS AFTER SETTING UP ALL OF THE AID ENTRIES
+function get_old_simple_aid_entries(){
+  $aid_entries = array('math_aid','chem_aid','american_aid','bio_aid','ees_aid','english_aid','epd_aid','intdisc_aid','history_aid','physics_aid','polisci_aid','psych_aid','socanth_aid');
+
+    return $aid_entries;
+}
+
+function get_simple_aid_entries(){
+  $aid_entries = array('american_aid_entry','bio_aid_entry','chem_aid_entry','coll_aid_entry','ees_aid_entry','english_aid_entry','epd_aid_entry','intdisc_aid_entry','history_aid_entry','math_aid_entry','misc_aid_entry','physics_aid_entry','polisci_aid_entry','psych_aid_entry','socanth_aid_entry');
+
+    return $aid_entries;
+}
+
+function get_simple_aid_types(){
+  $aid_types = array('american_aid_type','bio_aid_type','chem_aid_type','coll_aid_type','ees_aid_type','english_aid_type','epd_aid_type','intdisc_aid_type','history_aid_type','math_aid_type','misc_aid_type','physics_aid_type','polisci_aid_type','psych_aid_type','socanth_aid_type');
+
+    return $aid_types;
+}
+
+
+function get_class_bundles($checked_depts){
+
+    //BE SURE TO CHECK THAT THESE AID BUNDLES MATCH THE MACHINE NAME
+
+    $dept_bundles = array();
+
+    foreach($checked_depts as $dept){
+        switch($dept){
+        case 'American Studies':
+            $dept_bundles[] = 'american_aid_entry';
+            break;
+        case 'Biology':
+            $dept_bundles[] = 'bio_aid_entry';
+            break;
+        case 'Chemistry':
+            $dept_bundles[] = 'chem_aid_entry';
+            break;
+        case 'College':
+            $dept_bundles[] = 'coll_aid_entry';
+            break;
+        case 'EES':
+            $dept_bundles[] = 'ees_aid_entry';
+            break;
+        case 'English':
+            $dept_bundles[] = 'english_aid_entry';
+            break;
+        case 'EPD':
+            $dept_bundles[] = 'epd_aid_entry';
+            break;
+	case 'Interdisciplinary':
+	    $dept_bundles[] = 'intdisc_aid_entry';
+	    break;
+        case 'History':
+            $dept_bundles[] = 'history_aid_entry';
+            break;
+        case 'Math':
+            $dept_bundles[] = 'math_aid_entry';
+            break;
+        case 'Miscellaneous':
+            $dept_bundles[] = 'misc_aid_entry';
+            break;
+        case 'Physics':
+            $dept_bundles[] = 'physics_aid_entry';
+            break;
+        case 'Political Science':
+            $dept_bundles[] = 'polisci_aid_entry';
+            break;
+        case 'Psychology':
+            $dept_bundles[] = 'psych_aid_entry';
+            break;
+        case 'Sociology-Anthropology':
+            $dept_bundles[] = 'socanth_aid_entry';
+            break;
+        }
+    }
+    
+    return $dept_bundles;
+}
+
+
+function fetch_class_enrollment($form, &$form_state){
+
+    //INVALIDATED IF THERE IS NO TERM SELECTED OR NO DEPARTMENTS SELECTED!
+  dsm($form['tuition_tool_select_term']['#value']);
+    $termarray = explode("-",$form['tuition_tool_select_term']['#value']);
+    $curterm = $termarray[0];
+    $termtid = $termarray[1];
+
+    $bundle_array = get_class_bundles($form['enroll_actions']['department_checkboxes']['#value']);
+    //make sure that the user selected at least 1 bundle
+    if (count($bundle_array) > 0){
+    
+        $banner_connect = connect_to_banner(); //create a connection to banner
+        
+        $ent_query = new EntityFieldQuery();//new entity query object to get nodes that have
+        $ent_query->entityCondition('entity_type','node') //type is node 
+                  ->entityCondition('bundle',$bundle_array,'IN') //only select from the same bundle (i.e. dept aid)a
+                  ->propertyCondition('status',NODE_PUBLISHED) //the node is published
+                  ->fieldCondition('field_crn','value','0','>')
+                  ->fieldCondition('field_term','tid',$termtid,'='); //only select if it uses the selected term
+        
+        $match_ents = $ent_query->execute();
+        
+        if(count($match_ents)>0){
+            if(count($match_ents['node'])>0){
+                $crn_errors = 0;
+                $crn_success = 0;
+                foreach($match_ents['node'] as $myent){
+                    $match_ids[] = $myent->nid;
+                }
+                //now load in the entity objects
+                $load_ents = entity_load('node',$match_ids);
+                
+                foreach($load_ents as $curnode){
+                    $curnid = $curnode->nid;
+                    $classes_size = array('und'=>array());
+                    $crn_list = $curnode->field_crn['und'];
+                    $crn_ind = 0;
+                    foreach($crn_list as $mycrns){
+                        $crn = $mycrns['value'];
+                        $myclasssize = get_crn_class_size($banner_connect,$crn,$curterm);
+                        if($myclasssize == 99999 || $myclasssize == 0){
+                            drupal_set_message('WARNING: <a href="/node/'.$curnid.'">node: '.$curnid.'</a> returned an error for CRN: '.$crn." and TERM: ".$curterm.".",'warning');
+                            $crn_errors +=1 ;
+                        }
+                        else{$crn_success += 1;}
+                        $classes_size['und'][$crn_ind] = array('value'=> $myclasssize);
+                        $crn_ind += 1;
+                    }
+                    $curnode->field_class_size = $classes_size;
+                    entity_save('node',$curnode);
+                }//end of foreach node returned in the query
+                //give a little info about the results
+                if($crn_errors == 0){
+                    drupal_set_message('SUCCESS! All ('.$crn_success.') class sizes fetched successfully!','status');
+                }
+                else{
+                    drupal_set_message('FINISHED fetching class sizes with '.$crn_errors.' ERRORS.  '.$crn_success.' SUCCESSES','status');
+                }
+            }//end of if results['node'] returned results
+        }//end of if the entity query returned results
+        else{
+            drupal_set_message("There were no Aid Entries from the selected department list for the term chosen",'warning');
+        }
+    }//end of if the user selected and bundles
+    else{
+        drupal_set_message("You did not select any Bundles to fetch enrollment for. Please select atleast 1 and try again.",'warning');
+    }
+    
+}
+
+function set_aid_type_year($form, &$form_state){
+    //sets the default academic YEAR for all aid types
+    $aid_types = get_simple_aid_types();
+
+    $new_default = $form['set_year_actions']['select_year']['#value'];
+    variable_set('default_year',$new_default);
+
+    foreach($aid_types as $curtype){
+        $cur_inst = field_info_instance('node','field_term_year',$curtype);
+        if(empty($cur_inst['default_value'])){
+            $cur_inst['default_value'] = array(array('tid' => $new_default));
+        }
+        else{
+            $cur_inst['default_value'][0]['tid'] = $new_default;
+        }
+        field_update_instance($cur_inst);
+    }
+    drupal_set_message('Successfully updated all Aid Types default Year.','status');
+    drupal_set_message('WARNING: Do not forget to update the default term since you have selected a new default year.','warning');
+}
+
+function set_aid_entry_term($form, &$form_state){
+    //sets the default TERM for all aid entries
+    $aid_entries = get_simple_aid_entries();
+    
+    $new_default = $form['set_term_actions']['select_term']['#value'];
+    variable_set('default_term',$new_default);
+
+    foreach($aid_entries as $curentry){
+        $cur_inst = field_info_instance('node','field_term',$curentry);
+        if(empty($cur_inst['default_value'])){
+            $cur_inst['default_value'] = array(array('tid' => $new_default));
+        }
+        else{
+            $cur_inst['default_value'][0]['tid'] = $new_default;
+        }
+        field_update_instance($cur_inst);
+    }
+    drupal_set_message('Successfully updated all Aid Entry default Term.','status');
+}
+
+function set_aid_type_cost($form, &$form_state){
+    //sets the default AID TYPE COST for all aid types
+    $aid_types = get_simple_aid_types();
+
+    $new_default = $form['set_costcredit_actions']['input_cost']['#value'];
+    variable_set('default_cost_credit',$new_default);
+    
+    foreach($aid_types as $curtype){
+        $cur_inst = field_info_instance('node','field_cost_per_credit',$curtype);
+        
+        if(empty($new_default)){
+            $cur_inst['default_value'] = NULL;
+        }
+        /*
+        elseif(empty($cur_inst['default_value'])){
+            $cur_inst['default_value'] = array(array('value' => $new_default));
+        }
+        */
+        else{
+            $cur_inst['default_value'][0]['value'] = $new_default;
+        }
+        field_update_instance($cur_inst);
+    }
+
+    drupal_set_message('Successfully updated all Aid Types default Cost/Credit.','status');   
+}
+
+function get_aid_type_years(){
+    //gets the list of all academic years(taxonomy terms)
+    $years = array();
+    
+    $ent_query = new EntityFieldQuery();
+    //these conditions filter the node list that will do the summing.
+    $ent_query->entityCondition('entity_type','taxonomy_term') //type is term
+              ->entityCondition('bundle','academic_year'); //only select from the same bundle (i.e. dept aid type)
+              //->entityCondition('bundle','term_year') //'term_year' was the old name of the bundle
+
+    $match_ents = $ent_query->execute();
+    
+    foreach($match_ents['taxonomy_term'] as $myent){
+        $match_ids[] = $myent->tid;
+    }
+    //load node objects into iterable array
+    $load_years = entity_load('taxonomy_term',$match_ids);
+    
+    foreach($load_years as $curtid){
+        $years[$curtid->tid] = $curtid->name;
+    }
+        
+    arsort($years);
+    return $years;
+}
+
+function sort_terms_by_code($a,$b){
+    //function to sort terms by the banner term_code
+    //high (newest year) to low (oldest year)
+    $a_code = $a->field_banner_term_code['und'][0]['value'];
+    $b_code = $b->field_banner_term_code['und'][0]['value'];
+    
+    if($a_code < $b_code){
+        return 1;
+    }
+    elseif($a_code > $b_code){
+        return -1;
+    }
+    else{
+        return 0;
+    }
+}
+
+function get_default_year_terms(){
+    // gets a list of ONLY THE TERMS FOR THE DEFAULT ACADEMIC YEAR
+    $terms = array();
+    
+    $ent_query = new EntityFieldQuery();
+    //these conditions filter the node list that will do the summing.
+    $ent_query->entityCondition('entity_type','taxonomy_term') //type is term
+              ->entityCondition('bundle','termcodes'); //only select from the same bundle (i.e. dept aid type)
+
+    $year = variable_get('default_year');
+    if(!empty($year)){
+        $ent_query->fieldCondition('field_academic_year','tid',$year,'='); //only refine the query if this variable is set.
+    }
+
+    $match_ents = $ent_query->execute();
+    
+    foreach($match_ents['taxonomy_term'] as $myent){
+        $match_ids[] = $myent->tid;
+    }
+    //load node objects into iterable array
+    $load_terms = entity_load('taxonomy_term',$match_ids);
+    
+    //this sorts the results by the banner term code
+    uasort($load_terms,'sort_terms_by_code');
+    
+    foreach($load_terms as $curtid){
+        $terms[$curtid->tid] = $curtid->name;
+    }
+
+    if(!(in_array(variable_get('default_term'),array_keys($terms)))){
+        drupal_set_message('ERROR: Default TERM is not within the default ACADEMIC YEAR! Please change the default term.','error');
+    }
+
+    $terms_sort = array_reverse($terms, true);    
+    return $terms_sort;
+}
+
+
+function get_aid_entry_terms(){
+    //gets the list of ALL terms, sorted by banner code in custom function above
+    $terms = array();
+    
+    $ent_query = new EntityFieldQuery();
+    //these conditions filter the node list that will do the summing.
+    $ent_query->entityCondition('entity_type','taxonomy_term') //type is term
+              ->entityCondition('bundle','termcodes'); //only select from the same bundle (i.e. dept aid type)
+
+    $match_ents = $ent_query->execute();
+    
+    foreach($match_ents['taxonomy_term'] as $myent){
+        $match_ids[] = $myent->tid;
+    }
+    //load node objects into iterable array
+    $load_terms = entity_load('taxonomy_term',$match_ids);
+    
+    //this sorts the results by the banner term code
+    uasort($load_terms,'sort_terms_by_code');
+    foreach($load_terms as $curtid){
+        $terms[$curtid->tid] = $curtid->name;
+    }
+
+    return $terms;
+}
+
+function get_node_form_terms(){
+    // gets a list of ONLY THE TERMS FOR THE DEFAULT ACADEMIC YEAR
+    $terms_list = array();
+    
+    $ent_query = new EntityFieldQuery();
+    //these conditions filter the node list that will do the summing.
+    $ent_query->entityCondition('entity_type','taxonomy_term') //type is term
+              ->entityCondition('bundle','termcodes'); //only select from the same bundle (i.e. dept aid type)
+
+    $year = variable_get('default_year');
+    if(!empty($year)){
+        $ent_query->fieldCondition('field_academic_year','tid',$year,'='); //only refine the query if this variable is set.
+    }
+
+    $match_ents = $ent_query->execute();
+    
+    foreach($match_ents['taxonomy_term'] as $myent){
+        $match_ids[] = $myent->tid;
+    }
+    //load node objects into iterable array
+    $load_terms = entity_load('taxonomy_term',$match_ids);
+    
+    //this sorts the results by the banner term code
+    uasort($load_terms,'sort_terms_by_code');
+    
+    foreach($load_terms as $curtid){
+        $terms_list[$curtid->tid] = $curtid->name;
+    }
+
+    $terms = array_reverse($terms_list, true);    
+
+    if(!(in_array(variable_get('default_term'),array_keys($terms)))){
+        drupal_set_message('ERROR: Default TERM is not within the default ACADEMIC YEAR! Please contact the graduate office about this error.','error');
+        $year_ent_list = entity_load('taxonomy_term',array($year));
+        $year_ent = $year_ent_list[$year];
+        $default_year = $year_ent->name;
+
+        drupal_set_message('WARNING: Year for Aid Types: '.$default_year.'. Please set your term accordingly if the year is correct. If not, contact the graduate office.','warning');
+        $terms = get_aid_entry_terms();
+    }
+
+    return $terms;
+}
+
+
+function tuition_tool_enrollment_form($form, &$form_state){
+    
+  $termlist = get_terms_for_class_size();
+  //$termlist = get_aid_entry_terms(); //old list, only fetches name and tid
+  $depts=array(t('Math'),t('College'),t('Chemistry'),t('American Studies'),t('Biology'),t('EES'),t('English'),t('EPD'),t('Interdisciplinary'),t('History'),t('Physics'),t('Political Science'),t('Psychology'),t('Sociology-Anthropology'),t('Miscellaneous'));
+    $yearlist =  get_aid_type_years();
+
+    $form['tuition_tool_initial_text'] = array(
+        '#markup' => t("You must Select a term and the Departments for which you would like to fetch enrollment size. Then hit 'Get Class Enrollment'."),
+        '#weight' => -15,
+    );
+    //SELECT TERM FOR CLASS ENROLLMENT
+    $form['tuition_tool_select_term'] = array(
+        '#type' => 'select',
+        '#title' => t('Select Term to collect enrollment for'),
+        '#options' => $termlist,
+        '#required' => TRUE,
+        '#weight' => -10,
+    );
+    //CLASS ENROLLMENT ACTIONS
+    $form['enroll_actions'] = array(
+        '#type' => 'actions',
+        '#weight' => -5,
+    );
+
+    $form['enroll_actions']['department_checkboxes'] = array(
+        '#type' => 'checkboxes',
+        '#title' => t('Please Choose the departments to get class enrollment for'),
+        '#required' => TRUE,
+        '#default_value' => $depts,
+        '#options' => drupal_map_assoc($depts),
+    );
+
+    $form['enroll_actions']['tuition_tool_set_enrollment'] = array(
+        '#type' => 'button',
+        '#value' => t('Get Class Enrollment'),
+        '#required' => TRUE,
+        '#validate' => array('fetch_class_enrollment'),
+        '#name' => 'set_enrollment_button',
+    );
+
+    return system_settings_form($form);
+
+}
+
+function tuition_tool_admin_form($form, &$form_state){
+    //setup some variables I am going to use.
+    
+    //$termlist = get_aid_entry_terms();
+    $termlist = get_default_year_terms();
+    $termlist_keys = array_keys($termlist);
+    $other_default_term = $termlist_keys[0];
+
+    $depts=array(t('Math'),t('College'),t('Chemistry'),t('American Studies'),t('Biology'),t('EES'),t('English'),t('EPD'),t('Interdisciplinary'),t('History'),t('Physics'),t('Political Science'),t('Psychology'),t('Sociology-Anthropology'),t('Miscellaneous'));
+    $yearlist =  get_aid_type_years();
+    $yearlist_keys = array_keys($yearlist);
+    $other_default_year = $yearlist_keys[0];
+
+    //SET DEFAULT AID TYPE YEAR ACTIONS
+    $form['set_year_actions'] = array(
+        '#type' => 'actions',
+        '#weight' => 0,
+        '#attributes' => array('class' => array('tuitool-admin-set-default')),
+    );
+
+    $form['set_year_actions']['select_year'] = array(
+        '#type' => 'select',
+        '#title' => t('Select new default year for ALL aid types, then hit Set Aid Type Year Default'),
+        '#options' => $yearlist,
+        '#default_value' => variable_get('default_year',$other_default_year),
+        //'#default_value' => variable_get('default_year',array_keys($yearlist)[0]), //APPARENTLY THIS DOESN'T WORK ON PHP 5.3.3 (CAS2)
+    );
+    
+    $form['set_year_actions']['set_year'] = array(
+        '#type' => 'button',
+        '#value' => t('Set Aid Type Year Default'),
+        '#validate' => array('set_aid_type_year'),
+        '#name' => 'set_year_button',
+    );
+    //SET DEFAULT AID ENTRY TERM ACTIONS
+    $form['set_term_actions'] = array(
+        '#type' => 'actions',
+        '#weight' => 5,
+        '#attributes' => array('class' => array('tuitool-admin-set-default')),
+    );
+    
+    $form['set_term_actions']['select_term'] = array(
+        '#type' => 'select',
+        '#title' => t('Select new default Term for ALL Aid Entries, then hit Set Aid Entry Term Default'),
+        '#options' => $termlist,
+        '#default_value' => variable_get('default_term',$other_default_term),
+        //'#default_value' => variable_get('default_term',array_keys($termlist)[0]),//APPARENTLY THIS DOESN'T WORK ON PHP 5.3.3 (CAS2)
+    );
+    
+    $form['set_term_actions']['set_term'] = array(
+        '#type' => 'button',
+        '#value' => t('Set Aid Entry Term Default'),
+        '#validate' => array('set_aid_entry_term'),
+        '#name' => 'set_term_button',
+    );
+
+    $form['set_costcredit_actions'] = array(
+        '#type' => 'actions',
+        '#weight' => 10,
+        '#attributes' => array('class' => array('tuitool-admin-set-default')),
+    );
+
+    $form['set_costcredit_actions']['input_cost'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Cost Per Credit Default'),
+        '#size' => 50,
+        '#default_value' => variable_get('default_cost_credit'),
+    );
+
+    $form['set_costcredit_actions']['set_cost'] = array(
+        '#type' => 'button',
+        '#value' => t('Set Default Cost/Credit'),
+        '#validate' => array('set_aid_type_cost'),
+        '#name' => 'set_cost_button',
+    );
+
+    /*
+      I removed this becuase I hid the 'save configuration' button.
+    $form['tuition_tool_save_config_markup'] = array(
+        '#markup' => t('You should NOT need to save the configuration, once you get class enrollment you can exit or leave this page.'),
+        '#weight' => 15,
+    );
+    */
+   
+    return system_settings_form($form);
+}
+
+
+function set_dept_defaults($bundle_name,$update_fields){
+    //sets the default value a bunch of fields given in $update_fields for $bundle_name
+
+    foreach($update_fields as $field => $value){
+        if($field == 'field_aid_type'){
+            $value_type = 'target_id';
+        }else{
+            $value_type = 'value';
+        }
+        
+        $cur_inst = field_info_instance('node',$field,$bundle_name);
+        
+        if(empty($value) && ($field == 'field_check_location' || $field == 'field_phone' || $field == 'field_contact')){
+            drupal_set_message('Field '.str_replace('field_','',$field).' CANNOT BE EMPTY, reverting to old value','error');
+            continue;
+        }
+        elseif(empty($value)){
+            //I just want to be explicit here in redefining this value as NULL
+            $cur_inst['default_value'] = NULL;
+        }
+        else{
+            $cur_inst['default_value'][0][$value_type] = $value;
+        }
+
+        field_update_instance($cur_inst);
+        
+        drupal_set_message("Updated Default Value of ".str_replace('field_','',$field)." to ".$value,'status');
+    }
+}
+
+function get_dept_field_defaults($bundle_name){
+    //get the current field defaults for the menu that allows users to set the defaults
+
+    $field_names = array(
+        'field_aid_type'=> 'target_id',
+        'field_check_location'=>'value',
+        'field_phone' => 'value',
+	'field_contact' => 'value',
+        'field_account_number' => 'value',
+        'field_effort' => 'value',
+        'field_pay_periods' => 'value',
+    );
+
+    $field_defaults = array();
+    
+    foreach($field_names as $name => $value_type){
+        $cur_inst = field_info_instance('node',$name,$bundle_name);
+        $cur_default = $cur_inst['default_value'];
+        if(empty($cur_default)){
+            $field_defaults[$name] = NULL;
+        }
+        else{
+            $field_defaults[$name] = $cur_default[0][$value_type];
+        }
+    }
+
+    return $field_defaults;
+}
+
+
+function tuition_tool_update_dept_defaults_validation($form){
+    
+    $form_name = $form['#id'];
+    //$bundle_name = explode('-',$form_name)[2].'_aid_entry'; //APPARENTLY THIS DOESN'T WORK ON PHP 5.3.3 (CAS2)
+    $expl_form_name = explode('-',$form_name);
+    $bundle_name =  $expl_form_name[2].'_aid_entry';
+
+    $update_fields = array();
+
+    foreach($form['set_default_actions'] as $action => $value){
+        if(substr($action,0,1) == '#'){
+            continue;
+        }
+        else{
+            $field_name = "field_".str_replace(array("set_","_default"),"",$action);
+            //first if there is no value
+            if(empty($value['#value'])){
+                if(empty($value['#default_value'])){
+                    continue; //we don't need to update this field
+                }
+                else{
+                    //uncomment the next line to print out a warning when the user is about to set the value to empty
+                    //drupal_set_message('WARNING: You are about to set the default value to nothing(empty). Did you mean to do that?','warning');
+                    $update_fields[$field_name] = NULL; //might need to modify this if the field is an integer, like account?
+                }
+            }//value is not empty
+            else{
+                if($value['#value'] == $value['#default_value']){
+                    continue; //don't update the default value
+                }
+                else{
+                    $update_fields[$field_name] = $value['#value'];
+                }
+            }
+        }
+    }//done checking to see if default vaules need updating
+        
+    if(count($update_fields) == 0){
+        drupal_set_message('WARNING: You did not update any field defaults, did you mean to do that?','warning');
+    }
+    else{
+        set_dept_defaults($bundle_name,$update_fields);
+    }
+}
+
+
+
+//validation functions that are called automatically when a user saves the configuration for the field default menu pages
+function tuition_tool_american_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_bio_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_chem_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_coll_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_ees_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_english_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_epd_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_intdisc_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_history_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_math_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_misc_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_physics_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_polisci_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_psych_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+function tuition_tool_socanth_defaults_form_validate($form, &$form_state){
+    tuition_tool_update_dept_defaults_validation($form);
+}
+
+
+function tuition_tool_department_defaults_form($form, $dept){
+    
+    $field_defaults = get_dept_field_defaults($dept.'_aid_entry');
+    $aid_types = get_aid_types($dept.'_aid_type');
+   
+    $form[$dept.'_defaults'] = array(
+        '#markup' => t('From this page you can set defaults for certain fields in your aid entry form. Current Defaults are shown. Simply Change the desired defaults then hit Save.'),
+        '#weight' => -10,
+    );
+
+    $form['set_default_actions'] = array(
+        '#type' => 'actions',
+        '#weight' => 0,
+    );
+
+    $form['set_default_actions']['set_aid_type_default'] = array(
+        '#type' => 'select',
+        '#title' => t('Please select new Aid Type Default'),
+        '#options' => $aid_types,
+        '#default_value' => $field_defaults['field_aid_type'],
+    );
+
+    $form['set_default_actions']['set_check_location_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set Check Location defatult. (NOTE: cannot be empty)'),
+        '#default_value' => $field_defaults['field_check_location'],
+    );
+    
+    $form['set_default_actions']['set_phone_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set Phone Extension Default (NOTE: cannot be empty)'),
+        '#default_value' => $field_defaults['field_phone'],
+    );
+    
+    $form['set_default_actions']['set_contact_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set Contact Default (NOTE: cannot be empty)'),
+        '#default_value' => $field_defaults['field_contact'],
+    );
+
+    $form['set_default_actions']['set_account_number_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set Account # default'),
+	'#description'=>t('WARNING: if this value is filled in and is not 6 DIGITS LONG it will throw an error when you fill an entry'),
+        '#default_value' => $field_defaults['field_account_number'],
+    );
+
+    $form['set_default_actions']['set_effort_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set % Effort Default'),
+        '#default_value' => $field_defaults['field_effort'],
+    );
+
+    $form['set_default_actions']['set_pay_periods_default'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Set # Pay Periods Default'),
+        '#default_value' => $field_defaults['field_pay_periods'],
+    );
+
+    return $form;
+}
+
+function tuition_tool_land_default_form($form, &$form_state){
+    $form['default_landing'] = array(
+        '#markup' => t('This is a simple landing page to make the menu hierachy for setting defaults easier. NOTHING CAN BE DONE ON THIS PAGE.'),
+    );
+
+    return system_settings_form($form);
+}
+
+
+
+//functions that generate the different menu forms that the coordinators can use to set their defaults
+function tuition_tool_american_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'american');
+    return system_settings_form($form);
+}
+function tuition_tool_bio_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'bio');
+    return system_settings_form($form);
+}
+function tuition_tool_chem_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'chem');
+    return system_settings_form($form);
+}
+function tuition_tool_coll_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'coll');
+    return system_settings_form($form);
+}
+function tuition_tool_ees_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'ees');
+    return system_settings_form($form);
+}
+function tuition_tool_english_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'english');
+    return system_settings_form($form);
+}
+function tuition_tool_epd_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'epd');
+    return system_settings_form($form);
+}
+function tuition_tool_intdisc_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'intdisc');
+    return system_settings_form($form);
+}
+function tuition_tool_history_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'history');
+    return system_settings_form($form);
+}
+function tuition_tool_math_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'math');
+    return system_settings_form($form);
+}
+function tuition_tool_misc_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'misc');
+    return system_settings_form($form);
+}
+function tuition_tool_physics_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'physics');
+    return system_settings_form($form);
+}
+function tuition_tool_polisci_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'polisci');
+    return system_settings_form($form);
+}
+function tuition_tool_psych_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'psych');
+    return system_settings_form($form);
+}
+function tuition_tool_socanth_defaults_form($form, &$form_state){    
+    $form = tuition_tool_department_defaults_form($form, 'socanth');
+    return system_settings_form($form);
+}
